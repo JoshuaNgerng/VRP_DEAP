@@ -1,7 +1,12 @@
 import random
 import math
+import numpy as np
 from copy import deepcopy
-from typing import Type, TypeVar, List, Dict, Tuple, NamedTuple
+from deap import base
+from typing import Type, TypeVar, List, Dict, Tuple, NamedTuple, Protocol
+
+class IndividualTemplate(Protocol):
+	fitness: base.Fitness
 
 class Factory:
 	class Truck(NamedTuple):
@@ -134,7 +139,7 @@ class Factory:
 		self.truck = self.Truck(*truck.values())
 		self.tech_cost = self.TechCost(*tech_cost.values())
 		if hard_penalty is None:
-			hard_penalty = (max(truck.values()) + max(tech_cost.values())) * 100
+			hard_penalty = (max(truck.values()) + max(tech_cost.values())) ** 2
 		self.hard_penalty = hard_penalty
 		if isinstance(seed, int):
 			random.seed(seed)
@@ -168,11 +173,6 @@ class Factory:
 	def getDist(self, pt1: Tuple[int, int], pt2: Tuple[int, int]) -> float:
 		x1, y1 = pt1; x2, y2 = pt2
 		return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-
-	def truckScheduleInit(self) -> List[int]:
-		buffer = range(self.requests[0].id, self.requests[-1].id + self.days - 1)
-		buffer = random.sample(buffer, len(buffer))
-		return [id if id < self.requests[-1].id else 0 for id in buffer]
 
 	def evaluateTruckScedule(
 			self, schedule: List[int],
@@ -219,7 +219,6 @@ class Factory:
 			buffer.total_dist += self.getDist(buffer.prev_pos, (0, 0))
 			buffer.prev_pos = (0, 0)
 			buffer.total_truck += buffer.no_truck
-			# print(f"debug no_truck {buffer.no_truck}")
 			if buffer.max_truck < buffer.no_truck:
 				buffer.max_truck = buffer.no_truck
 			buffer.no_truck = 0
@@ -292,6 +291,138 @@ class Factory:
 		if len(day_route) > 0:
 			detail_schedule.append(day_route.copy())
 		return buffer.total_cost
+
+	def truckScheduleInit(self) -> List[int]:
+		added = []
+		avaliable = []
+		urgent = []
+		res = []
+
+		def get_valid_requests(day: int):
+			for req in self.requests:
+				id = req.id
+				if day > req.last or day < req.first:
+					continue
+				if id in added:
+					continue
+				if day == req.last:
+					urgent.append(id)
+				else:
+					avaliable.append(id)
+			# print(f'debug init {avaliable}, {urgent}')
+
+		for day in range(1, self.days):
+			buffer = []
+			get_valid_requests(day)
+			if len(avaliable) == 0 and len(urgent) == 0:
+				res.append(0)
+				continue
+			if len(avaliable) > 0:
+				no = random.randint(0, len(avaliable))
+				buffer = random.sample(avaliable, no)
+			buffer.extend(random.sample(urgent, len(urgent)))
+			res.extend(buffer)
+			added.extend(buffer)
+			avaliable.clear()
+			urgent.clear()
+			res.append(0)
+		return res
+
+	def mutateSwapDayOrder(self, individual: IndividualTemplate, indpb: float) -> Tuple[IndividualTemplate]:
+		if random.random() > indpb:
+			return (individual, )
+		day = random.randint(0, self.days)
+		# day = 1
+		# print(f'debug swapday {day}')
+		start = 0
+		end = len(individual) - 1
+		count = 1
+		for idx, slot in enumerate(individual):
+			if slot > 0:
+				continue
+			count += 1
+			if count == day:
+				start = idx
+			if count == day + 1:
+				end = idx
+				break
+		# print(f'debug swapday {start}, {end}')
+		if end == start:
+			return (individual, )
+		buffer = random.sample(individual[start:end], end - start)
+		individual[start:end] = buffer
+		# for idx, ele in enumerate(buffer):
+			# individual[start + idx] = ele
+		# print(f'debug {type(individual)}')
+		return (individual, )
+	
+	def mutateExchangeDeliverDay(self, individual: IndividualTemplate, indpb: float) -> Tuple[IndividualTemplate]:
+		def skewed_sample(start, end, scale=5):
+			value = int(np.random.exponential(scale)) + start
+			return min(value, end)
+
+		def find_request(id, individual):
+			day = 1
+			index = 0
+			for idx, slot in enumerate(individual):
+				if slot == 0:
+					day += 1
+				if slot == id:
+					index = idx
+			return (day, index)
+
+		def change_request_day(id, day, index, individual):
+			def move_element(lst, idx1, idx2):
+				# Ensure idx1 is the smaller index
+				if idx1 > idx2:
+					idx1, idx2 = idx2, idx1
+				# Remove element from idx2 (larger index)
+				element = int(lst.pop(idx2))
+				# Insert the element at idx1 (smaller index)
+				lst.insert(idx1, element)
+
+			req = self.requests[id - 1]
+			new_day = random.choice(range(req.first, req.last))
+			if new_day == day and new_day - 1 >= req.first:
+				new_day -= 1
+			count = 1
+			start = 0
+			end = len(individual) - 1
+			for idx, slot in enumerate(individual):
+				if slot > 0:
+					continue
+				count += 1
+				if count == new_day:
+					start = idx
+				if count == new_day + 1:
+					end = idx
+					break
+			new_index = start + 1
+			if start + 1 < end:
+				new_index = random.choice(range(start + 1, end))
+			# print(f'debug before {type(individual)}, {len(individual)}, new_index:{new_index} index:{index}')
+			move_element(individual, new_index, index)
+			# print(f'debug after {type(individual)}, {len(individual)}')
+
+		if random.random() > indpb:
+			return (individual, )
+		no = skewed_sample(1, self.requests[-1].id)
+		# print(f'debug no:{no}')
+		req = random.sample(range(1, self.requests[-1].id + 1), no)
+		# print(f'debug exchangedeliver id={req}')
+		# req = [1, 15, 17]
+		for id in req:
+			day, index = find_request(id, individual)
+			change_request_day(id, day, index, individual)
+		# print(f'debug fin {type(individual)}, {len(individual)}')
+		# print()
+		return (individual, )
+
+	# def crossoverDay(self, parent1: IndividualTemplate, parent2: IndividualTemplate) -> Tuple[IndividualTemplate]:
+	# 	offspring1 = deepcopy(parent1)
+	# 	offspring2 = deepcopy(parent2)
+	# 	breakpoint = random.randint(1, self.days)
+
 
 def mutate_swap(genes: List[int], indpb: float) -> Tuple[List[int]]:
 	"""
@@ -426,59 +557,59 @@ def alternating_edge_crossover(parent1: List[int], parent2: List[int]) -> Tuple[
 	
 	return (offspring1, offspring2)
 
-def ordered_crossover(parent1: list, parent2: list) -> Tuple[list, list]:
-	"""Performs ordered crossover (OX1) on two parents."""
+def debug_split_on_zero(lst):
+	# Initialize an empty list to store sublists
+	result = []
+	sublist = []
 	
-	size = len(parent1)
+	for element in lst:
+		if element == 0:
+			# If we encounter a 0, save the current sublist and reset it
+			result.append(sublist)
+			sublist = []
+		else:
+			# Otherwise, add the element to the current sublist
+			sublist.append(element)
 	
-	# Step 1: Select random crossover points
-	start, end = sorted(random.sample(range(size), 2))
+	# Append the last sublist if it's not empty
+	result.append(sublist)
 	
-	# Step 2: Create offspring initialized with empty values (-1 as placeholder)
-	offspring1 = deepcopy(parent1)
-	offspring2 = deepcopy(parent2)
-	
-	# Step 3: Copy the segment from each parent
-	offspring1[start:end+1] = parent1[start:end+1]
-	offspring2[start:end+1] = parent2[start:end+1]
-	
-	# Step 4: Fill remaining positions from the other parent in order
-	def fill_offspring(offspring, parent):
-		pos = (end + 1) % size  # Start filling from the next position after the copied segment
-		for gene in parent:
-			if gene not in offspring:  # Only add if it's not already in the offspring
-				offspring[pos] = gene
-				pos = (pos + 1) % size  # Move to the next position
-	
-	fill_offspring(offspring1, parent2)
-	fill_offspring(offspring2, parent1)
-	
-	return offspring1, offspring2
+	return result
 
 def main():
 	factory = Factory('test_1.txt', seed=200)
-	# print(factory)
+	print(factory.requests[1 - 1])
 	t1 = factory.truckScheduleInit()
-	print(t1)
+	# buffer = debug_split_on_zero(t1)
+	# for day in buffer:
+		# print(day)
+	# print()
+	# buffer = debug_split_on_zero(factory.mutateSwapDayOrder(t1, 1)[0])
+	# for day in buffer:
+		# print(day)
+	# buffer = debug_split_on_zero(factory.mutateExchangeDeliverDay(t1, 1)[0])
+	# for day in buffer:
+		# print(day)
+	# print(t1)
 	summary = {}
 	detail = []
 	cost = factory.evaluateTruckScedule(t1, summary, detail)
 	print(cost)
 	print(summary)
-	print(f'debug {len(detail)}')
+	# print(f'debug {len(detail)}')
 	for index, day in enumerate(detail):
 		print(f"day {index + 1}")
 		for truck in day:
 			print(truck)
-	p1 = factory.getLoc(43); p2 = factory.getLoc(5); p3 = (0, 0)
-	dist1 = factory.getDist(p1, p3); dist2 = factory.getDist(p2, p3)
-	dist3 = factory.getDist(p1, p2)
-	cap1 = factory.getCap(43); cap2 = factory.getCap(5)
-	print(f'max dist {factory.truck.max_distance}, max cap {factory.truck.capacity}')
-	print(f'debug, loc 1{p1} dist {dist1}')
-	print(f'debug, loc 2{p2} dist {dist2}')
-	print(f'dist between {dist3}, total {dist1 + dist3 + dist2}, v2 {dist1 * 2 + dist2 * 2}')
-	print(f'capacity {cap1} {cap2}, total {cap1 + cap2}')
+	# p1 = factory.getLoc(43); p2 = factory.getLoc(5); p3 = (0, 0)
+	# dist1 = factory.getDist(p1, p3); dist2 = factory.getDist(p2, p3)
+	# dist3 = factory.getDist(p1, p2)
+	# cap1 = factory.getCap(43); cap2 = factory.getCap(5)
+	# print(f'max dist {factory.truck.max_distance}, max cap {factory.truck.capacity}')
+	# print(f'debug, loc 1{p1} dist {dist1}')
+	# print(f'debug, loc 2{p2} dist {dist2}')
+	# print(f'dist between {dist3}, total {dist1 + dist3 + dist2}, v2 {dist1 * 2 + dist2 * 2}')
+	# print(f'capacity {cap1} {cap2}, total {cap1 + cap2}')
 
 if __name__ == "__main__":
 	main()
