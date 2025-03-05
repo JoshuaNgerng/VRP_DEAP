@@ -172,4 +172,5 @@ cython_debug/
 
 # debug
 debug*
-test.ipynb
+test*
+performance*
