@@ -3,10 +3,12 @@ import math
 import sys
 import numpy as np
 from deap import base
-from typing import Callable, TypeVar, NamedTuple, Optional
+from typing import Union, Iterator, Callable, TypeVar, NamedTuple, Optional
 from typing_extensions import Self
 
-class CreatorTemplate(list[int | list]):
+class CreatorTemplate(list):
+	truck: list[int]
+	technicians: list[list[int]]
 	fitness: base.Fitness
 
 class Factory:
@@ -41,6 +43,40 @@ class Factory:
 		dist_limit: int
 		req_limit: int
 		machine: int
+
+	class DaySchedule:
+		truck: list[int]
+		technicians: list[list[int]]
+		def __init__(self, truck_part: list[int], tech_part: list[list[int]]):
+			self.truck = truck_part.copy(); self.technicians = tech_part.copy()
+		def __str__(self) -> str:
+			s = "truck schedule\n"
+			for individual in self.truck:
+				s += individual
+				s += '\n'
+			s += "technicians\n"
+			for idx, individual in enumerate(self.technicians):
+				if len(individual) == 0:
+					continue
+				s += f'{idx + 1} -> {individual}\n'
+		def __iter__(self) -> Iterator[list[int] | list[list[int]]]:
+				yield self.truck
+				yield self.technicians
+	class Schedule:
+		day_schedules: list['Factory.DaySchedule'] = []
+		def __init__(self, truck_part: list[list[int]], tech_part: list[list[list[int]]]):
+			self.day_schedules = [
+				Factory.DaySchedule(truck_day, tech_day)
+				for truck_day, tech_day in zip(truck_part, tech_part)
+			]
+		def __str__(self) -> str:
+			s = "Schedule\n"
+			for day_count, day_schedule in enumerate(self.day_schedules):
+				s += f"{day_count + 1}\n{day_schedule}\n"
+		def __iter__(self) -> Iterator['Factory.DaySchedule']:
+			for day_schedule in self.day_schedules:
+				yield day_schedule
+
 	class TruckEvalSheet:
 		total_truck_dist: float = 0.0
 		max_truck: int = 0
@@ -63,6 +99,8 @@ class Factory:
 			self.add_stat(other)
 			if len(other.schedule) > 0:
 				self.schedule.append(other.schedule)
+		def extend(self, other: Self):
+			self.schedule.extend(other.schedule)
 		def cal_cost(self, factory: 'Factory') -> int:
 			self.total_cost = self.total_truck_dist * factory.truck.distance_cost + \
 				self.total_truck * factory.truck.day_cost + \
@@ -100,7 +138,8 @@ class Factory:
 		def cal_cost(self, factory: 'Factory') -> int:
 			self.total_cost = self.total_tech_dist * factory.tech_cost.distance_cost + \
 				self.total_tech_deployed * factory.tech_cost.day_cost + \
-				self.totalTechResigter() * factory.tech_cost.cost + self.idle_machine_cost
+				self.totalTechResigter() * factory.tech_cost.cost + \
+				self.idle_machine_cost + self.total_tech_penalty
 			self.total_cost = int(self.total_cost)
 			return self.total_cost
 		def resigterTech(self, id: int):
@@ -109,7 +148,6 @@ class Factory:
 			return (self.no_tech_employed & (1 << id)) != 0
 		def totalTechResigter(self) -> int:
 			return bin(self.no_tech_employed).count('1')
-
 	class EvalSheet:
 		schedule = []
 		def __init__(
@@ -118,7 +156,8 @@ class Factory:
 			):
 			self.truck = Factory.TruckEvalSheet()
 			if truck is not None:
-				self.truck.add(truck)
+				self.truck.add_stat(truck)
+				self.truck.extend(truck)
 			self.tech = Factory.TechEvalSheet()
 			if tech is not None:
 				self.tech.add(tech)
@@ -249,7 +288,7 @@ class Factory:
 		self.truck = self.Truck(*truck.values())
 		self.tech_cost = self.TechCost(*tech_cost.values())
 		if hard_penalty is None:
-			hard_penalty = (max(truck.values()) + max(tech_cost.values())) ** 5
+			hard_penalty = (max(truck.values()) + max(tech_cost.values())) ** 2
 		self.hard_penalty = hard_penalty
 		if isinstance(seed, int):
 			random.seed(seed)
@@ -273,7 +312,7 @@ class Factory:
 		return s
 
 	def resigterTruckScheduleRef(self, truck: CreatorTemplate):
-		self.truck_schedule_ref = truck
+		self.truck_schedule_ref = self.splitScheduleByDay(truck)
 
 	def resigterIndividualClass(self, individual: Callable[[], CreatorTemplate]):
 		self.individual_creator = individual
@@ -289,19 +328,22 @@ class Factory:
 		size = self.machines[req.machine_id - 1].weight
 		return size * req.machine_quantity
 
-	def getDist(self, pt1: tuple[int, int], pt2: tuple[int, int]) -> float:
-		x1, y1 = pt1; x2, y2 = pt2
-		return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-
 	def checkTechSkill(self, tech_id: int, machine_id: int) -> bool:
 		bits = self.technicians[tech_id - 1].machine
 		return (bits & (1 << machine_id - 1)) != 0
 
-	def skewed_sample(self, start, end, scale=5):
+	@staticmethod
+	def getDist(pt1: tuple[int, int], pt2: tuple[int, int]) -> float:
+		x1, y1 = pt1; x2, y2 = pt2
+		return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+
+	@staticmethod
+	def skewed_sample(start, end, scale=5):
 		value = int(np.random.exponential(scale)) + start
 		return min(value, end)
 
-	def removeDup(self, lst: list) -> tuple[list, set]:
+	@staticmethod
+	def removeDup(lst: list) -> tuple[list, set]:
 		res = []
 		seen = set()
 		for el in lst:
@@ -313,7 +355,8 @@ class Factory:
 				res.append(el)
 		return (res, seen)
 
-	def findDayInSchedule(self, id: int, schedule: list[int]) -> int:
+	@staticmethod
+	def findDayInSchedule(id: int, schedule: list[int]) -> int:
 		day = 1
 		for id_ in schedule:
 			if id_ == 0:
@@ -322,8 +365,9 @@ class Factory:
 				return day
 		return -1
 
+	@staticmethod
 	def getDayIndexesInSchedule(
-			self, day: int, schedule: list[int]
+			day: int, schedule: list[int]
 		) -> tuple[int, int]:
 		day_count = 1; start = 0; end = len(schedule)
 		for idx, id in enumerate(schedule):
@@ -337,7 +381,8 @@ class Factory:
 				break
 		return (start, end)
 
-	def splitScheduleByDay(self, schedule: list[int]) -> list[list[int]]:
+	@staticmethod
+	def splitScheduleByDay(schedule: list[int]) -> list[list[int]]:
 		buffer = []
 		res = []
 		for id in schedule:
@@ -571,23 +616,24 @@ class Factory:
 		# print(f'debug {len(offspring1)}, {len(offspring2)}')
 		return (offspring1, offspring2)
 
-	def technicianInit(self) -> list[list[int]]:
+	def technicianInit(self) -> Schedule:
 		truck = self.truck_schedule_ref
-		truck_index = 0
-		deliver_today = []
 		already_delivered = []
 		res: list[list[int]] = []
 		buffer: list['Factory.TechStat'] = []
 
-		def get_delivered_today():
-			nonlocal truck_index
-			deliver_today.clear()
-			while truck_index < len(truck):
-				if truck[truck_index] == 0:
-					truck_index += 1
-					return
-				deliver_today.append(truck[truck_index])
-				truck_index += 1
+		def reorganize_schedule(tech: list):
+			tech_part = []
+			for t in tech:
+				tech_part.append(self.splitScheduleByDay(t))
+			tech_buffer = []
+			for idx in range(len(tech_part[0])):
+				buffer = []
+				for individual in tech_part:
+					# print(f'debug {len(individual)}')
+					buffer.append(individual[idx])
+				tech_buffer.append(buffer)
+			return tech_buffer
 
 		def avaliable_tech(machine_id: int, pos: tuple[int, int]):
 			res = []
@@ -599,18 +645,19 @@ class Factory:
 			return res
 
 		def assign_nearest_tech(
-				buffer: list['Factory.TechStat'], tech: list[int], pos: tuple[int, int]
+				tech_stat: list['Factory.TechStat'], tech_ids: list[int], pos: tuple[int, int]
 			) -> int:
 			dist = sys.maxsize
 			id_res = 0
 			#valid_id = []
-			for id in tech:
-				ref = buffer[id - 1]
+			for id in tech_ids:
+				ref = tech_stat[id - 1]
 				if ref.deploy_count >= ref.deploy_limit:
 					continue
 				check = self.getDist(ref.pos, pos)
 				ret_dist = self.getDist(pos, ref.home)
-				if check < dist and check + ret_dist < ref.dist_limit:
+				if check < dist and \
+					ref.dist + check + ret_dist < ref.dist_limit:
 					id_res = id
 					dist = check
 				# if check + ret_dist < ref.dist_limit:
@@ -621,9 +668,10 @@ class Factory:
 
 			if id_res == 0:
 				return -1
-			ref = buffer[id_res - 1]
+			ref = tech_stat[id_res - 1]
 			ref.dist += dist
 			ref.worked = True
+			ref.pos = pos
 			return id_res
 			# return random.choice(valid_id)
 
@@ -633,11 +681,7 @@ class Factory:
 				self.getLoc(tech.location), tech.dist_limit, tech.req_limit
 			))
 
-		# count = 0
-		for _ in range(self.days):
-			# print(f'test visited loop {count}')
-			# count += 1
-			get_delivered_today()
+		for delivered_today in truck:
 			remain = []
 			for id in already_delivered:
 				req: 'Factory.Request' = self.requests[id - 1]
@@ -649,16 +693,17 @@ class Factory:
 				else:
 					remain.append(id)
 			already_delivered = remain
-			already_delivered.extend(deliver_today)
+			already_delivered.extend(delivered_today)
 			for tech in res:
 				tech.append(0)
 			for tech in buffer:
 				tech.reset()
-		return res
+		tech_buffer : list[list[list[int]]] = reorganize_schedule(res)
+		return self.Schedule(truck, tech_buffer)
 
 	def evaluateTechDay(
 			self, already_delivered: list[int],
-			tech_stat: list[TechStat], day_schedule: list[list[int]]
+			tech_stat: list[TechStat], tech_day: list[list[int]]
 		) -> tuple[TechEvalSheet, list[int]]:
 		res = self.TechEvalSheet(len(self.technicians))
 		check = []
@@ -669,7 +714,8 @@ class Factory:
 			res.tech_penalty[idx] += penalty
 			res.total_tech_penalty += penalty
 
-		for idx, tech in enumerate(day_schedule):
+		for idx, tech in enumerate(tech_day):
+			# print(f'debug {tech}')
 			if len(tech) == 0:
 				continue
 			stat = tech_stat[idx]
@@ -693,9 +739,11 @@ class Factory:
 			tech.dist += self.getDist(tech.pos, tech.home)
 			res.total_tech_dist += tech.dist
 			if tech.dist > tech.dist_limit:
+				# print(f'dist limit {idx}')
 				assign_penalty(idx, tech.dist - tech.dist_limit)
 			tech.reset()
 			if tech.deploy_count > tech.deploy_limit:
+				# print(f'deploy limit')
 				assign_penalty(idx)
 			res.total_tech_penalty += tech.dist
 
@@ -707,30 +755,8 @@ class Factory:
 		return (res, remain)
 
 	def evaluateSchedule(
-			self, tech: list[list[int]], detail: bool = False
+			self, schedule: Schedule, detail: bool = False
 		) -> EvalSheet:
-		def reorganize_schedule(
-				truck: list[int], tech: list[list[int]]
-			) -> list[tuple[list[int], list[list[int]]]]:
-			truck_part = self.splitScheduleByDay(truck)
-			tech_part = []
-			for t in tech:
-				# print(f'debuggin t {t}')
-				tech_part.append(self.splitScheduleByDay(t))
-			tech_buffer = []
-			for idx in range(len(tech_part[0])):
-				buffer = []
-				for individual in tech_part:
-					# print(f'debug {len(individual)}')
-					buffer.append(individual[idx])
-				tech_buffer.append(buffer)
-
-			res = []
-			for truck_day, tech_day in zip(truck_part, tech_buffer):
-				res.append((truck_day, tech_day))
-
-			return res
-
 		eval_truck = self.TruckEvalSheet()
 		eval_tech = self.TechEvalSheet(len(self.technicians))
 		tech_status = [
@@ -738,10 +764,10 @@ class Factory:
 			for tech in self.technicians
 		]
 		already_delivered = []
-		schedule = reorganize_schedule(self.truck_schedule_ref, tech)
-		# print(f'debug\n{schedule}')
-		for day_count, (truck_day, tech_day) in enumerate(schedule):
-			# print(f'debug {truck_day}'); print(f'debug {tech_day}')
+
+		for day_count, day_schedule in enumerate(schedule):
+			truck_day, tech_day = tuple(day_schedule)
+			# print(f'{type(truck_day)}, {type(tech_day)}, {type(tech_day[0])}, {type(tech_day[0][0])}')
 			truck_score = self.evaluateTruckDaySchedule(day_count + 1, truck_day, detail)
 			eval_truck.add(truck_score)
 			tech_res = self.evaluateTechDay(already_delivered, tech_status, tech_day)
@@ -751,17 +777,13 @@ class Factory:
 
 		res = self.EvalSheet(truck=eval_truck, tech=eval_tech)
 		res.cal_cost(self)
-		if detail != True:
-			return res
-		for truck_day, (_, tech_day) in zip(eval_truck.schedule, schedule):
-			res.schedule.append((truck_day, tech_day))
 		return res
 
 	def mutateTechSwap(
-			self, tech_schedule: CreatorTemplate, indpb: float
+			self, schedule: CreatorTemplate, indpb: float
 		) -> tuple[CreatorTemplate]:
 		def find_request(id: int) -> tuple[int, int]:
-			for idx, tech in enumerate(tech_schedule):
+			for idx, tech in enumerate(schedule):
 				for idx2, id_ in enumerate(tech):
 					if id_ == id:
 						return (idx, idx2)
@@ -781,7 +803,7 @@ class Factory:
 		def exchange_request(
 				id: int, pos: int, tech_idx: int, new_tech_id: int
 			):
-			tech_ref: list = tech_schedule[new_tech_id - 1]
+			tech_ref: list[int] = schedule.technicians[new_tech_id - 1]
 			day = self.findDayInSchedule(id, self.truck_schedule_ref) + 1
 			start, end = self.getDayIndexesInSchedule(day, tech_ref)
 			if start == end:
@@ -902,7 +924,9 @@ def test_len(factory, tech):
 def main():
 	def empty_list():
 		return []
-	factory = Factory('test_1.txt')#, seed=200)
+	seed = random.randint(1, 999)
+	print(f'seed {seed}')
+	factory = Factory('test_2.txt', seed=seed)
 	factory.resigterIndividualClass(empty_list)
 	truck = factory.truckScheduleInit()
 	# print(truck)
@@ -911,11 +935,13 @@ def main():
 	factory.resigterTruckScheduleRef(truck)
 	tech = factory.technicianInit()
 	eval = factory.evaluateSchedule(tech)
-	tech2 = factory.technicianInit()
-	factory.mutateTechScramble(tech, 1)
-	factory.mutateTechSwap(tech, 1)
-	offspring = factory.crossoverTech(tech, tech2)
-	test_len(factory, offspring[0]); test_len(factory, offspring[1])
+	print(eval)
+	print(eval.cal_cost(factory))
+	# tech2 = factory.technicianInit()
+	# factory.mutateTechScramble(tech, 1)
+	# factory.mutateTechSwap(tech, 1)
+	# offspring = factory.crossoverTech(tech, tech2)
+	# test_len(factory, offspring[0]); test_len(factory, offspring[1])
 	# print(test)
 
 if __name__ == "__main__":
