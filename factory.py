@@ -2,14 +2,10 @@ import random
 import math
 import sys
 import numpy as np
+from copy import deepcopy
 from deap import base
 from typing import Union, Iterator, Callable, TypeVar, NamedTuple, Optional
 from typing_extensions import Self
-
-class CreatorTemplate(list):
-	truck: list[int]
-	technicians: list[list[int]]
-	fitness: base.Fitness
 
 class Factory:
 	class Truck(NamedTuple):
@@ -51,14 +47,16 @@ class Factory:
 			self.truck = truck_part.copy(); self.technicians = tech_part.copy()
 		def __str__(self) -> str:
 			s = "truck schedule\n"
-			for individual in self.truck:
-				s += individual
-				s += '\n'
+			# for individual in self.truck:
+			# 	s += individual
+			# 	s += '\n'
+			s += f'{str(self.truck)}\n'
 			s += "technicians\n"
 			for idx, individual in enumerate(self.technicians):
 				if len(individual) == 0:
 					continue
 				s += f'{idx + 1} -> {individual}\n'
+			return s
 		def __iter__(self) -> Iterator[list[int] | list[list[int]]]:
 				yield self.truck
 				yield self.technicians
@@ -73,9 +71,14 @@ class Factory:
 			s = "Schedule\n"
 			for day_count, day_schedule in enumerate(self.day_schedules):
 				s += f"{day_count + 1}\n{day_schedule}\n"
+			return s
 		def __iter__(self) -> Iterator['Factory.DaySchedule']:
 			for day_schedule in self.day_schedules:
 				yield day_schedule
+		def __getitem__(self, idx: int) -> 'Factory.DaySchedule':
+			return self.day_schedules[idx]
+		def __len__(self) -> int:
+			return len(self.day_schedules)
 
 	class TruckEvalSheet:
 		total_truck_dist: float = 0.0
@@ -311,13 +314,13 @@ class Factory:
 			s += str(tech) + '\n'
 		return s
 
-	def resigterTruckScheduleRef(self, truck: CreatorTemplate):
+	def resigterTruckScheduleRef(self, truck: list[int]):
 		self.truck_schedule_ref = self.splitScheduleByDay(truck)
 
-	def resigterIndividualClass(self, individual: Callable[[], CreatorTemplate]):
+	def resigterIndividualClass(self, individual: Callable[[], list[int]]):
 		self.individual_creator = individual
 
-	def makeCreatorTemplate(self) -> CreatorTemplate:
+	def makeCreatorTemplate(self) -> list[int] | Schedule:
 		return self.individual_creator()
 
 	def getLoc(self, id: int) -> tuple[int]:
@@ -518,8 +521,8 @@ class Factory:
 		return res
 
 	def mutateSwapDayOrder(
-			self, individual: CreatorTemplate, indpb: float
-		) -> tuple[CreatorTemplate]:
+			self, individual: list[int], indpb: float
+		) -> tuple[list[int]]:
 		if random.random() > indpb:
 			return (individual, )
 		day = random.randint(0, self.days)
@@ -534,8 +537,8 @@ class Factory:
 		return (individual, )
 	
 	def mutateExchangeDeliverDay(
-			self, individual: CreatorTemplate, indpb: float
-		) -> tuple[CreatorTemplate]:
+			self, individual: list[int], indpb: float
+		) -> tuple[list[int]]:
 		def find_request(id):
 			day = 1
 			index = 0
@@ -570,8 +573,8 @@ class Factory:
 		return (individual, )
 
 	def crossoverTruck(
-			self, parent1: CreatorTemplate, parent2: CreatorTemplate
-		) -> tuple[CreatorTemplate]:
+			self, parent1: list[int], parent2: list[int]
+		) -> tuple[list[int]]:
 		def find_breakpoint_index(breakpoint: int):
 			index1 = 0
 			index2 = 0
@@ -616,7 +619,7 @@ class Factory:
 		# print(f'debug {len(offspring1)}, {len(offspring2)}')
 		return (offspring1, offspring2)
 
-	def technicianInit(self) -> Schedule:
+	def scheduleInit(self) -> Schedule:
 		truck = self.truck_schedule_ref
 		already_delivered = []
 		res: list[list[int]] = []
@@ -714,6 +717,7 @@ class Factory:
 			res.tech_penalty[idx] += penalty
 			res.total_tech_penalty += penalty
 
+		# print(f'debug {tech_day}')
 		for idx, tech in enumerate(tech_day):
 			# print(f'debug {tech}')
 			if len(tech) == 0:
@@ -780,14 +784,17 @@ class Factory:
 		return res
 
 	def mutateTechSwap(
-			self, schedule: CreatorTemplate, indpb: float
-		) -> tuple[CreatorTemplate]:
-		def find_request(id: int) -> tuple[int, int]:
-			for idx, tech in enumerate(schedule):
-				for idx2, id_ in enumerate(tech):
-					if id_ == id:
-						return (idx, idx2)
-			return (0, 0)
+			self, schedule: Schedule, indpb: float
+		) -> tuple[Schedule]:
+		
+		def find_request(id: int) -> tuple[int, int, int]:
+			for day_idx, day in enumerate(schedule):
+				_, tech_day = tuple(day)
+				for tech_idx, tech in enumerate(tech_day):
+					for idx, id_ in enumerate(tech):
+						if id == id_:
+							return (day_idx + 1, tech_idx, idx)
+			return (0, 0, 0)
 
 		def find_avaliable_tech(id: int, tech: int) -> list[int]:
 			buffer = []
@@ -800,95 +807,99 @@ class Factory:
 					buffer.append(tech_id)
 			return buffer
 
-		def exchange_request(
-				id: int, pos: int, tech_idx: int, new_tech_id: int
-			):
-			tech_ref: list[int] = schedule.technicians[new_tech_id - 1]
-			day = self.findDayInSchedule(id, self.truck_schedule_ref) + 1
-			start, end = self.getDayIndexesInSchedule(day, tech_ref)
-			if start == end:
-				return
-			new_pos = random.choice(range(start, end))
-			# print(f'before {tech_schedule[tech_id - 1]}')
-			tech_schedule[tech_idx].pop(pos)
-			# print(f'after {tech_schedule[tech_id - 1]}')
-			tech_ref.insert(new_pos, id)
-
 		if random.random() > indpb:
-			return (tech_schedule, )
+			return (schedule, )
 		no = self.skewed_sample(1, self.requests[-1].id)
 		req = random.sample(range(1, self.requests[-1].id + 1), no)
 		for id in req:
-			tech_idx, pos = find_request(id)
+			day, tech_idx, idx = find_request(id)
+			if day == 0:
+				continue
 			buffer = find_avaliable_tech(id, tech_idx + 1)
 			if len(buffer) == 0:
 				continue
 			new_tech_id = random.choice(buffer)
-			exchange_request(id, pos, tech_idx, new_tech_id)
-		return (tech_schedule, )
+			_, tech = tuple(schedule[day - 1])
+			new_idx = random.randint(0, len(tech[new_tech_id - 1]))
+			tech[new_tech_id - 1].insert(new_idx, id)
+			tech[tech_idx].pop(idx)
+		return (schedule, )
 
-	def mutateTechScramble(self, tech_schedule: CreatorTemplate, indpb: float) -> tuple[CreatorTemplate]:
+	def mutateTechScramble(self, schedule: Schedule, indpb: float) -> tuple[Schedule]:
 		if random.random() > indpb:
-			return (tech_schedule, )
-		day = random.randint(1, self.days)
+			return (schedule, )
+		day = random.randint(1, self.days - 2)
 		tech_id = random.randint(1, self.technicians[-1].id)
-		tech_ref = tech_schedule[tech_id - 1]
-		start, end = self.getDayIndexesInSchedule(day, tech_ref)
-		# print(f'debug {start}, {end}, {len(tech_schedule)}')
-		if start == end:
-			return (tech_schedule, )
-		lst = tech_ref[start:end]
-		random.shuffle(lst)
-		tech_ref[start:end] = lst
-		return (tech_schedule, )
+		# print(f'day:{day}, tech_id:{tech_id} {len(schedule)}')
+		_, tech = tuple(schedule[day - 1])
+		random.shuffle(tech[tech_id - 1])
+		return (schedule, )
 
 	def crossoverTech(
-			self, parent1: CreatorTemplate, parent2: CreatorTemplate
-		) -> tuple[CreatorTemplate, CreatorTemplate]:
-		def remove_dup(lst: list[list[int]]) -> tuple[list[list[int], set[int]]]:
+			self, parent1: Schedule, parent2: Schedule
+		) -> tuple[Schedule, Schedule]:
+		offspring1 = deepcopy(parent1); offspring2 = deepcopy(parent2)
+
+		def remove_dup(lst: list[int], seen: set[int]) -> list[int]:
 			res = []
-			seen = set()
-			for row in lst:
-				buffer, seen_ = self.removeDup(row)
-				res.append(buffer)
-				seen.union(seen_)
-			return (res, seen)
+			for ele in lst:
+				if ele not in seen:
+					res.append(ele)
+					seen.add(ele)
+			return res
 
-		def find_day(id: int, parent: CreatorTemplate) -> tuple[int, int]:
-			tech_idx = 0
-			day = 0
-			for idx, tech in enumerate(parent):
-				check = self.findDayInSchedule(id, tech)
-				if check > 0:
-					day = check
-					tech_idx = idx
-					break
-			return (tech_idx, day)
+		def wrapper_remove_dup(
+				para: tuple[int, list[int], list[int]], sets: tuple[set[int], set[int]]
+			) -> tuple[list[int], list[int]]:
+			lst1 = remove_dup(para[1], sets[0])
+			lst2 = remove_dup(para[2], sets[1])
+			return (lst1, lst2)
 
-		def repair_lst(
-				offspring: list[list[int]], seen: set[int], parent: CreatorTemplate
+		def wrapper_swap_person(
+				para: tuple[int, list[int], list[int]], placeholder = None
+			) -> tuple[list[int], list[int]]:
+			if para[0] %2 == 0:
+				return (para[1], para[2])
+			return (para[2], para[1])
+
+		def loop_schedule(func, para):
+			for day, day2 in zip(offspring1, offspring2):
+				_, tech1 = tuple(day)
+				_, tech2 = tuple(day2)
+				for idx, (person1, person2) in enumerate(zip(tech1, tech2)):
+					person1, person2 = func((idx, person1, person2), para)
+
+		def find_id(schedule: 'Factory.Schedule', id: int):
+			for day_idx, day in enumerate(schedule):
+				_, tech_day = tuple(day)
+				for tech_idx, tech in enumerate(tech_day):
+					if id in tech:
+						return (day_idx, tech_idx)
+			return (-1, -1)
+
+
+		def repair_schedule(
+				diff: set[int],
+				offspring: 'Factory.Schedule', parent: 'Factory.Schedule'
 			):
-			diff = set(range(1, self.requests[-1].id)) - seen
 			for id in diff:
-				tech_idx, day = find_day(id, parent)
-				tech_ref = offspring[tech_idx]
-				start, end = self.getDayIndexesInSchedule(day, tech_ref)
-				tech_ref.insert(random.randint(start, end), id)
+				day_idx, tech_idx = find_id(parent, id)
+				target_tech = offspring[day_idx].technicians[tech_idx]
+				if len(target_tech) == 0:
+					target_tech.append(id)
+					continue
+				insert_pos = random.randint(0, len(target_tech) - 1)
+				target_tech.insert(insert_pos, id)
 
-		buffer1 = []; buffer2 = []
-		for i in range(len(parent1)):
-			if i % 2 == 0:
-				buffer1.append(parent1[i]); buffer2.append(parent2[i])
-			else:
-				buffer1.append(parent2[i]); buffer2.append(parent1[i])
-		buffer1, seen1 = remove_dup(buffer1)
-		buffer2, seen2 = remove_dup(buffer2)
-		repair_lst(buffer1, seen1, parent1)
-		repair_lst(buffer2, seen2, parent2)
-		offspring1 = self.makeCreatorTemplate()
-		offspring2 = self.makeCreatorTemplate()
-		offspring1.extend(buffer1); offspring2.extend(buffer2)
+		visited1 = set(); visited2= set()
+		loop_schedule(wrapper_swap_person, None)
+		loop_schedule(wrapper_remove_dup, (visited1, visited2))
+		all_set = set(range(1, self.requests[-1].id + 1))
+		diff1 = all_set - visited1; diff2 = all_set - visited2
+		repair_schedule(diff1, offspring1, parent1)
+		repair_schedule(diff2, offspring2, parent2)
 		return (offspring1, offspring2)
+		
 
 def debug_split_on_zero(lst):
 	result = []
@@ -925,6 +936,7 @@ def main():
 	def empty_list():
 		return []
 	seed = random.randint(1, 999)
+	seed = 165
 	print(f'seed {seed}')
 	factory = Factory('test_2.txt', seed=seed)
 	factory.resigterIndividualClass(empty_list)
@@ -933,10 +945,12 @@ def main():
 	eval = factory.evaluateTruckSchedule(truck, False)
 	# print(eval)
 	factory.resigterTruckScheduleRef(truck)
-	tech = factory.technicianInit()
-	eval = factory.evaluateSchedule(tech)
+	schedule = factory.technicianInit()
+	eval = factory.evaluateSchedule(schedule)
 	print(eval)
 	print(eval.cal_cost(factory))
+	print(schedule)
+	test = factory.mutateTechScramble(schedule, 1)
 	# tech2 = factory.technicianInit()
 	# factory.mutateTechScramble(tech, 1)
 	# factory.mutateTechSwap(tech, 1)
