@@ -174,3 +174,4 @@ cython_debug/
 debug*
 test*
 performance*
+test/*
